@@ -1,4 +1,4 @@
-Simple map-data package
+Mapping code for sentencing data 
 
 Contents:
 - map_world.qmd — Quarto document that builds a working spatial dataset and plots highlighted countries.
