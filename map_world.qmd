@@ -1,0 +1,180 @@
+---
+title: "Simple reproducible map: selected countries"
+format: html
+execute:
+  echo: true
+  warning: false
+  error: false
+---
+
+This Quarto document provides a very small, easy-to-read R workflow that:
+
+- reads `data.xlsx` and finds the column containing country names (case-insensitive);
+- builds a single working spatial dataset (world + UK subdivisions) and caches it for fast reuse;
+- marks rows as `covered` when the spreadsheet contains a `Y/Yes/1` value in a coverage column;
+- leaves placeholders for additional variables (e.g. `legal_system_type`) so someone can add them later without changing the geometry code;
+- plots the selected countries directly to the R plotting pane (no file outputs by default).
+
+Notes:
+- If `rmapshaper` is installed the document will use `rmapshaper::ms_simplify()` for faster, topology-preserving simplification; otherwise it falls back to `sf::st_simplify()`.
+- The cache is saved to `cache/working_countries.rds`; set `rebuild_cache <- TRUE` below to force rebuilding.
+
+```{r setup}
+library(readxl)
+library(sf)
+library(ggplot2)
+
+# Paths (edit only these)
+input_path <- "data.xlsx"
+world_shp <- "World_Countries_Generalized.shp"
+uk_shp <- "UK/CTRY_DEC_2022_UK_BFC_v2_c.shp"
+
+# Cache control: set TRUE to rebuild caches (slow); otherwise loads cached object.
+rebuild_cache <- FALSE
+cache_dir <- "cache"
+cache_file <- file.path(cache_dir, "working_countries.rds")
+dir.create(cache_dir, showWarnings = FALSE)
+
+# Small helper: find country column case-insensitively
+find_country_col <- function(df) {
+  cand <- names(df)[tolower(names(df)) == "country"]
+  if (length(cand) == 0) stop("Spreadsheet must have a column named 'Country' (case-insensitive)")
+  cand[1]
+}
+
+``` 
+
+## Read data and determine covered countries
+
+```{r read-data}
+# read spreadsheet
+df <- read_excel(input_path)
+country_col <- find_country_col(df)
+
+# optional coverage column (search header containing 'cover')
+covered_col <- names(df)[grepl("cover", tolower(names(df)))]
+covered_names <- character(0)
+if (length(covered_col) > 0) {
+  covered_col <- covered_col[1]
+  cov_vals <- tolower(as.character(df[[covered_col]]))
+  covered_idx <- which(cov_vals %in% c("y","yes","true","1"))
+  covered_names <- unique(tolower(trimws(as.character(df[[country_col]]))[covered_idx]))
+}
+
+cat("Found country column:", country_col, "\n")
+cat("Number of covered names:", length(covered_names), "\n")
+``` 
+
+## Build working spatial dataset
+
+```{r build-working}
+# This document now builds the working spatial dataset directly from the
+# raw shapefiles. The combined object is called `map_data` and is kept
+# deliberately simple: one `name` column, geometry, a `source` flag,
+# placeholders for extra attributes, and a logical `covered` column.
+# Keep this code as is. 
+
+world0 <- st_read(world_shp, quiet = TRUE)
+uk0 <- st_read(uk_shp, quiet = TRUE)
+
+# choose sensible name fields
+wname <- intersect(c("COUNTRY","country","NAME","name","NAME_LONG","name_long","admin","ADMIN"), names(world0))[1]
+if (is.na(wname)) stop("No name field found in world shapefile")
+uname <- if ("CTRY22NM" %in% names(uk0)) "CTRY22NM" else intersect(names(uk0), c("name","NAME","country","COUNTRY"))[1]
+if (is.na(uname)) stop("No name field found in UK shapefile")
+
+# keep only name + geometry to preserve simplicity
+world <- world0[, wname, drop = FALSE]
+names(world)[1] <- "name"
+world$name <- tolower(trimws(as.character(world$name)))
+world$source <- "world"
+
+uk <- uk0[, uname, drop = FALSE]
+names(uk)[1] <- "name"
+uk$name <- tolower(trimws(as.character(uk$name)))
+uk$source <- "uk"
+
+# ensure same CRS
+if (st_crs(world) != st_crs(uk)) uk <- st_transform(uk, st_crs(world))
+
+# remove aggregate United Kingdom from world if present
+world <- world[!world$name %in% c("united kingdom","unitedkingdom","united kingdom of great britain and northern ireland"), ]
+
+# combine into a single working dataset named `map_data`
+map_data <- rbind(world, uk)
+
+# placeholders for easy attribute editing later (keeps structure similar to original data)
+map_data$legal_system_type <- NA_character_
+map_data$specialist_substance_use_courts <- NA_character_
+
+# mark coverage from spreadsheet (covered_names computed earlier)
+map_data$covered <- map_data$name %in% covered_names
+
+message("Built working dataset: map_data (rows = ", nrow(map_data), ")")
+
+``` 
+
+## Plot selected countries
+
+```{r plot, fig.height=7, fig.width=11}
+covered_count <- sum(map_data$covered, na.rm = TRUE)
+
+# remove Antarctica (and similar polar features) which distorts the map
+map_data_no_antar <- map_data[!grepl("antar", map_data$name), ]
+
+# prepare readable labels
+map_data_no_antar$label <- tools::toTitleCase(map_data_no_antar$name)
+
+p <- ggplot() +
+  geom_sf(data = map_data_no_antar, fill = "#f7f7f7", colour = "#dcdcdc", size = 0.08) +
+  geom_sf(data = subset(map_data_no_antar, covered), fill = "#2b8cbe", colour = "#08306b", size = 0.28, alpha = 0.95) +
+  labs(title = "Selected countries",
+       subtitle = paste0("Highlighted: ", covered_count, " countries from spreadsheet")) +
+  coord_sf(expand = FALSE) +
+  theme_void() +
+  theme(
+    plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
+    plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
+    plot.caption = element_text(size = 8, margin = margin(t = 8)),
+    panel.background = element_rect(fill = "#eaf3ff", colour = NA),
+    plot.background = element_rect(fill = "#ffffff", colour = NA),
+    legend.position = "right"
+  )
+
+# Add labels for covered countries. 
+covered_sf <- subset(map_data_no_antar, covered)
+if (nrow(covered_sf) > 0) {
+  pts <- st_point_on_surface(covered_sf)
+  pts$label <- tools::toTitleCase(covered_sf$name)
+  coords <- st_coordinates(pts)
+  labdf <- data.frame(X = coords[,1], Y = coords[,2], label = pts$label, stringsAsFactors = FALSE)
+  if (requireNamespace("ggrepel", quietly = TRUE)) {
+    p <- p + ggrepel::geom_label_repel(data = labdf,
+                                       aes(X, Y, label = label),
+                                       size = 3.8,
+                                       fontface = "bold",
+                                       fill = "#ffffffcc",
+                                       colour = "#08306b",
+                                       box.padding = 0.25,
+                                       segment.size = 0.2,
+                                       min.segment.length = 0,
+                                       max.overlaps = 200)
+  } else {
+    p <- p + geom_sf_text(data = pts, aes(label = label), size = 4, fontface = "bold", colour = "#08306b")
+  }
+}
+
+print(p)
+```
+
+## Quick edit: add or edit variables
+
+You can add or edit extra variables simply by editing `map_data` in R and saving a copy if you want to persist changes. Example:
+
+```{r edit-example}
+# Example: mark a few countries as having specialist courts and save a working copy
+map_data$legal_system_type[map_data$name %in% c("singapore")] <- "common law"
+map_data$specialist_substance_use_courts[map_data$name %in% c("singapore")] <- "yes"
+```
+
+

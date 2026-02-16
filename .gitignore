@@ -1,0 +1,22 @@
+.DS_Store
+# R
+.Rhistory
+.RData
+.Rproj.user
+.Ruserdata
+.Rapp.history
+# Quarto / output caches
+cache/
+output/
+dist_package/
+# saved R objects
+*.rds
+# macOS
+Icon\r
+__MACOSX/
+cache/
+output/
+.DS_Store
+.Rproj.user/
+.Rhistory
+.RData
