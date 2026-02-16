@@ -7,17 +7,16 @@ execute:
   error: false
 ---
 
-This Quarto document provides a very small, easy-to-read R workflow that:
+This Quarto document provides an R workflow that:
 
 - reads `data.xlsx` and finds the column containing country names (case-insensitive);
-- builds a single working spatial dataset (world + UK subdivisions) and caches it for fast reuse;
+- builds a single working spatial dataset (world + UK subdivisions);
 - marks rows as `covered` when the spreadsheet contains a `Y/Yes/1` value in a coverage column;
 - leaves placeholders for additional variables (e.g. `legal_system_type`) so someone can add them later without changing the geometry code;
 - plots the selected countries directly to the R plotting pane (no file outputs by default).
 
 Notes:
 - If `rmapshaper` is installed the document will use `rmapshaper::ms_simplify()` for faster, topology-preserving simplification; otherwise it falls back to `sf::st_simplify()`.
-- The cache is saved to `cache/working_countries.rds`; set `rebuild_cache <- TRUE` below to force rebuilding.
 
 ```{r setup}
 library(readxl)
@@ -29,11 +28,6 @@ input_path <- "data.xlsx"
 world_shp <- "World_Countries_Generalized.shp"
 uk_shp <- "UK/CTRY_DEC_2022_UK_BFC_v2_c.shp"
 
-# Cache control: set TRUE to rebuild caches (slow); otherwise loads cached object.
-rebuild_cache <- FALSE
-cache_dir <- "cache"
-cache_file <- file.path(cache_dir, "working_countries.rds")
-dir.create(cache_dir, showWarnings = FALSE)
 
 # Small helper: find country column case-insensitively
 find_country_col <- function(df) {
