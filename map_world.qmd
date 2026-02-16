@@ -25,7 +25,7 @@ library(ggplot2)
 
 # Paths (edit only these)
 input_path <- "data.xlsx"
-world_shp <- "World_Countries_Generalized.shp"
+world_shp <- "World_Countries_(Generalized)_-573431906301700955/World_Countries_Generalized.shp"
 uk_shp <- "UK/CTRY_DEC_2022_UK_BFC_v2_c.shp"
 
 
