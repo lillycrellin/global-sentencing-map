@@ -1,5 +1,5 @@
 ---
-title: "Simple reproducible map: selected countries"
+title: "Sentencing mapping"
 format: html
 execute:
   echo: true
@@ -25,9 +25,10 @@ library(ggplot2)
 
 # Paths (edit only these)
 input_path <- "data.xlsx"
-world_shp <- "World_Countries_(Generalized)_-573431906301700955/World_Countries_Generalized.shp"
+world_shp <- "World_Countries_Generalized.shp"
 uk_shp <- "UK/CTRY_DEC_2022_UK_BFC_v2_c.shp"
 
+# (No caching: the document always rebuilds `map_data` from the raw shapefiles.)
 
 # Small helper: find country column case-insensitively
 find_country_col <- function(df) {
@@ -57,6 +58,19 @@ if (length(covered_col) > 0) {
 
 cat("Found country column:", country_col, "\n")
 cat("Number of covered names:", length(covered_names), "\n")
+
+# Normalise common name variants to the shapefile naming where necessary (esp. turkey)
+# Add entries here as needed: spreadsheet -> shapefile name
+if (length(covered_names) > 0) {
+  alias_map <- c(
+    "turkey" = "turkiye"
+  )
+  covered_names <- sapply(covered_names, function(x) {
+    if (x %in% names(alias_map)) alias_map[[x]] else x
+  }, USE.NAMES = FALSE)
+  covered_names <- unique(covered_names)
+  message("Applied name alias mapping for common variants (e.g. turkey -> turkiye)")
+}
 ``` 
 
 ## Build working spatial dataset
@@ -108,6 +122,27 @@ message("Built working dataset: map_data (rows = ", nrow(map_data), ")")
 
 ``` 
 
+```{r diagnostic-matching}
+# Diagnostic: report any covered names from the spreadsheet that were not matched
+# against the shapefile `map_data$name`. Helpful to spot spelling/standardisation issues.
+covered_names <- sort(unique(covered_names))
+matched <- intersect(map_data$name, covered_names)
+unmatched <- setdiff(covered_names, map_data$name)
+cat("Covered names (spreadsheet):", length(covered_names), "\n")
+cat("Matched in shapefile :", length(matched), "\n")
+cat("Unmatched           :", length(unmatched), "\n")
+if (length(unmatched) > 0) {
+  print(unmatched)
+  # suggest closest matches by edit distance
+  suggestions <- sapply(unmatched, function(u) {
+    d <- utils::adist(u, map_data$name)
+    map_data$name[which.min(d)]
+  }, USE.NAMES = FALSE)
+  suggestion_df <- data.frame(requested = unmatched, suggestion = suggestions, stringsAsFactors = FALSE)
+  print(suggestion_df)
+}
+```
+
 ## Plot selected countries
 
 ```{r plot, fig.height=7, fig.width=11}
@@ -145,20 +180,56 @@ if (nrow(covered_sf) > 0) {
   if (requireNamespace("ggrepel", quietly = TRUE)) {
     p <- p + ggrepel::geom_label_repel(data = labdf,
                                        aes(X, Y, label = label),
-                                       size = 3.8,
+                                       size = 4.2,
                                        fontface = "bold",
-                                       fill = "#ffffffcc",
+                                       fill = "#ffffffee",
                                        colour = "#08306b",
-                                       box.padding = 0.25,
-                                       segment.size = 0.2,
+                                       box.padding = 0.35,
+                                       segment.size = 0.25,
+                                       segment.colour = "#08306b",
                                        min.segment.length = 0,
                                        max.overlaps = 200)
   } else {
-    p <- p + geom_sf_text(data = pts, aes(label = label), size = 4, fontface = "bold", colour = "#08306b")
+    p <- p + geom_label(data = labdf, aes(X, Y, label = label), size = 4.2, fontface = "bold", fill = "#ffffff", colour = "#08306b", label.r = unit(0.15, "lines"))
   }
 }
 
 print(p)
+```
+
+```{r plot-bw, fig.height=7, fig.width=11}
+# Greyscale map (no title) — useful for print or monochrome displays
+map_data_no_antar <- map_data[!grepl("antar", map_data$name), ]
+
+p_bw <- ggplot() +
+  geom_sf(data = map_data_no_antar, fill = "#f0f0f0", colour = "#d0d0d0", size = 0.08) +
+  geom_sf(data = subset(map_data_no_antar, covered), fill = "#4b4b4b", colour = "#000000", size = 0.2, alpha = 0.95) +
+  coord_sf(expand = FALSE) +
+  theme_void() +
+  theme(
+    panel.background = element_rect(fill = "#ffffff", colour = NA),
+    plot.background = element_rect(fill = "#ffffff", colour = NA),
+    legend.position = "none"
+  )
+
+# Add labels (greyscale)
+covered_sf <- subset(map_data_no_antar, covered)
+if (nrow(covered_sf) > 0) {
+  pts <- st_point_on_surface(covered_sf)
+  pts$label <- tools::toTitleCase(covered_sf$name)
+  coords <- st_coordinates(pts)
+  labdf <- data.frame(X = coords[,1], Y = coords[,2], label = pts$label, stringsAsFactors = FALSE)
+  if (requireNamespace("ggrepel", quietly = TRUE)) {
+    p_bw <- p_bw + ggrepel::geom_label_repel(data = labdf, aes(X, Y, label = label),
+                                            size = 3.8, fontface = "bold", colour = "#000000",
+                                            fill = "#ffffffcc", box.padding = 0.25, segment.size = 0.22,
+                                            segment.colour = "#444444", min.segment.length = 0, max.overlaps = 200)
+  } else {
+    p_bw <- p_bw + geom_label(data = labdf, aes(X, Y, label = label), size = 4, fontface = "bold", fill = "#ffffff", colour = "#000000", label.r = unit(0.15, "lines"))
+  }
+}
+
+print(p_bw)
 ```
 
 ## Quick edit: add or edit variables
