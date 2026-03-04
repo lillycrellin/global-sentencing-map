@@ -9,69 +9,78 @@ execute:
 
 This Quarto document provides an R workflow that:
 
-- reads `data.xlsx` and finds the column containing country names (case-insensitive);
-- builds a single working spatial dataset (world + UK subdivisions);
-- marks rows as `covered` when the spreadsheet contains a `Y/Yes/1` value in a coverage column;
-- leaves placeholders for additional variables (e.g. `legal_system_type`) so someone can add them later without changing the geometry code;
-- plots the selected countries directly to the R plotting pane (no file outputs by default).
+-   reads `data/legal_alcohol_policy.csv` as the single input dataset;
+-   builds a single working spatial dataset (world + UK subdivisions);
+-   marks rows as `covered` directly from the policy dataset;
+-   joins policy fields to each mapped country (where available);
+-   plots the selected countries directly to the R plotting pane (no file outputs by default).
 
-Notes:
-- If `rmapshaper` is installed the document will use `rmapshaper::ms_simplify()` for faster, topology-preserving simplification; otherwise it falls back to `sf::st_simplify()`.
+Notes: - If `rmapshaper` is installed the document will use `rmapshaper::ms_simplify()` for faster, topology-preserving simplification; otherwise it falls back to `sf::st_simplify()`.
 
 ```{r setup}
-library(readxl)
 library(sf)
 library(ggplot2)
+library(dplyr)
 
 # Paths (edit only these)
-input_path <- "data.xlsx"
-world_shp <- "World_Countries_Generalized.shp"
+policy_path <- "data/legal_alcohol_policy.csv"
 uk_shp <- "UK/CTRY_DEC_2022_UK_BFC_v2_c.shp"
+
+world_shp_candidates <- c(
+  "World_Countries_Generalized.shp",
+  "World_Countries_(Generalized)_-573431906301700955/World_Countries_Generalized.shp"
+)
+world_shp <- world_shp_candidates[file.exists(world_shp_candidates)][1]
+if (is.na(world_shp)) {
+  stop("Could not find world shapefile. Checked: ", paste(world_shp_candidates, collapse = ", "))
+}
 
 # (No caching: the document always rebuilds `map_data` from the raw shapefiles.)
 
-# Small helper: find country column case-insensitively
-find_country_col <- function(df) {
-  cand <- names(df)[tolower(names(df)) == "country"]
-  if (length(cand) == 0) stop("Spreadsheet must have a column named 'Country' (case-insensitive)")
-  cand[1]
+standardise_country <- function(x) {
+  out <- tolower(trimws(as.character(x)))
+  alias_map <- c(
+    "turkey" = "turkiye",
+    "czech republic" = "czechia",
+    "united states" = "united states of america"
+  )
+  out <- ifelse(out %in% names(alias_map), alias_map[out], out)
+  out
 }
 
-``` 
+```
 
-## Read data and determine covered countries
+## Read policy data
 
 ```{r read-data}
-# read spreadsheet
-df <- read_excel(input_path)
-country_col <- find_country_col(df)
-
-# optional coverage column (search header containing 'cover')
-covered_col <- names(df)[grepl("cover", tolower(names(df)))]
-covered_names <- character(0)
-if (length(covered_col) > 0) {
-  covered_col <- covered_col[1]
-  cov_vals <- tolower(as.character(df[[covered_col]]))
-  covered_idx <- which(cov_vals %in% c("y","yes","true","1"))
-  covered_names <- unique(tolower(trimws(as.character(df[[country_col]]))[covered_idx]))
+if (!file.exists(policy_path)) {
+  stop("Policy file not found at ", policy_path)
 }
 
-cat("Found country column:", country_col, "\n")
-cat("Number of covered names:", length(covered_names), "\n")
+policy_df <- read.csv(policy_path, stringsAsFactors = FALSE)
+names(policy_df) <- tolower(names(policy_df))
 
-# Normalise common name variants to the shapefile naming where necessary (esp. turkey)
-# Add entries here as needed: spreadsheet -> shapefile name
-if (length(covered_names) > 0) {
-  alias_map <- c(
-    "turkey" = "turkiye"
-  )
-  covered_names <- sapply(covered_names, function(x) {
-    if (x %in% names(alias_map)) alias_map[[x]] else x
-  }, USE.NAMES = FALSE)
-  covered_names <- unique(covered_names)
-  message("Applied name alias mapping for common variants (e.g. turkey -> turkiye)")
+required_cols <- c("country")
+missing_cols <- setdiff(required_cols, names(policy_df))
+if (length(missing_cols) > 0) {
+  stop("Policy file is missing required columns: ", paste(missing_cols, collapse = ", "))
 }
-``` 
+
+policy_df$country_std <- standardise_country(policy_df$country)
+policy_df <- policy_df %>% distinct(country_std, .keep_all = TRUE)
+
+if ("covered" %in% names(policy_df)) {
+  cvals <- tolower(trimws(as.character(policy_df$covered)))
+  policy_df$covered_policy <- cvals %in% c("y", "yes", "true", "1")
+} else {
+  policy_df$covered_policy <- TRUE
+}
+
+policy_country_names <- unique(policy_df$country_std)
+
+cat("Loaded policy rows:", nrow(policy_df), "\n")
+cat("Policy countries:", length(policy_country_names), "\n")
+```
 
 ## Build working spatial dataset
 
@@ -94,12 +103,12 @@ if (is.na(uname)) stop("No name field found in UK shapefile")
 # keep only name + geometry to preserve simplicity
 world <- world0[, wname, drop = FALSE]
 names(world)[1] <- "name"
-world$name <- tolower(trimws(as.character(world$name)))
+world$name <- standardise_country(as.character(world$name))
 world$source <- "world"
 
 uk <- uk0[, uname, drop = FALSE]
 names(uk)[1] <- "name"
-uk$name <- tolower(trimws(as.character(uk$name)))
+uk$name <- standardise_country(as.character(uk$name))
 uk$source <- "uk"
 
 # ensure same CRS
@@ -111,24 +120,31 @@ world <- world[!world$name %in% c("united kingdom","unitedkingdom","united kingd
 # combine into a single working dataset named `map_data`
 map_data <- rbind(world, uk)
 
-# placeholders for easy attribute editing later (keeps structure similar to original data)
-map_data$legal_system_type <- NA_character_
-map_data$specialist_substance_use_courts <- NA_character_
+# start from country membership in policy file
+map_data$covered <- map_data$name %in% policy_country_names
 
-# mark coverage from spreadsheet (covered_names computed earlier)
-map_data$covered <- map_data$name %in% covered_names
+# join legal/alcohol policy metadata and apply covered policy flag
+policy_join <- policy_df
+if ("covered" %in% names(policy_join)) {
+  policy_join$covered <- NULL
+}
+
+map_data <- map_data %>%
+  left_join(policy_join, by = c("name" = "country_std"))
+
+map_data$covered <- ifelse(is.na(map_data$covered_policy), map_data$covered, map_data$covered_policy)
 
 message("Built working dataset: map_data (rows = ", nrow(map_data), ")")
 
-``` 
+```
 
 ```{r diagnostic-matching}
-# Diagnostic: report any covered names from the spreadsheet that were not matched
+# Diagnostic: report any policy countries not matched in shapefile names
 # against the shapefile `map_data$name`. Helpful to spot spelling/standardisation issues.
-covered_names <- sort(unique(covered_names))
-matched <- intersect(map_data$name, covered_names)
-unmatched <- setdiff(covered_names, map_data$name)
-cat("Covered names (spreadsheet):", length(covered_names), "\n")
+policy_country_names <- sort(unique(policy_country_names))
+matched <- intersect(map_data$name, policy_country_names)
+unmatched <- setdiff(policy_country_names, map_data$name)
+cat("Policy country names:", length(policy_country_names), "\n")
 cat("Matched in shapefile :", length(matched), "\n")
 cat("Unmatched           :", length(unmatched), "\n")
 if (length(unmatched) > 0) {
@@ -146,32 +162,37 @@ if (length(unmatched) > 0) {
 ## Plot selected countries
 
 ```{r plot, fig.height=7, fig.width=11}
-covered_count <- sum(map_data$covered, na.rm = TRUE)
-
 # remove Antarctica (and similar polar features) which distorts the map
 map_data_no_antar <- map_data[!grepl("antar", map_data$name), ]
+
+if (!("covered" %in% names(map_data_no_antar))) {
+  map_data_no_antar$covered <- FALSE
+}
+
+highlighted_sf <- map_data_no_antar[!is.na(map_data_no_antar$covered) & map_data_no_antar$covered, ]
+covered_count <- nrow(highlighted_sf)
 
 # prepare readable labels
 map_data_no_antar$label <- tools::toTitleCase(map_data_no_antar$name)
 
 p <- ggplot() +
-  geom_sf(data = map_data_no_antar, fill = "#f7f7f7", colour = "#dcdcdc", size = 0.08) +
-  geom_sf(data = subset(map_data_no_antar, covered), fill = "#2b8cbe", colour = "#08306b", size = 0.28, alpha = 0.95) +
+  geom_sf(data = map_data_no_antar, fill = "#f0f0f0", colour = "#d0d0d0", size = 0.08) +
+  geom_sf(data = highlighted_sf, fill = "#4b4b4b", colour = "#000000", size = 0.2, alpha = 0.95) +
   labs(title = "Selected countries",
-       subtitle = paste0("Highlighted: ", covered_count, " countries from spreadsheet")) +
+    subtitle = paste0("Highlighted: ", covered_count, " countries from policy dataset")) +
   coord_sf(expand = FALSE) +
   theme_void() +
   theme(
     plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
     plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
     plot.caption = element_text(size = 8, margin = margin(t = 8)),
-    panel.background = element_rect(fill = "#eaf3ff", colour = NA),
+    panel.background = element_rect(fill = "#ffffff", colour = NA),
     plot.background = element_rect(fill = "#ffffff", colour = NA),
-    legend.position = "right"
+    legend.position = "none"
   )
 
 # Add labels for covered countries. 
-covered_sf <- subset(map_data_no_antar, covered)
+covered_sf <- highlighted_sf
 if (nrow(covered_sf) > 0) {
   pts <- st_point_on_surface(covered_sf)
   pts$label <- tools::toTitleCase(covered_sf$name)
@@ -182,54 +203,196 @@ if (nrow(covered_sf) > 0) {
                                        aes(X, Y, label = label),
                                        size = 4.2,
                                        fontface = "bold",
-                                       fill = "#ffffffee",
-                                       colour = "#08306b",
+                                       fill = "#ffffffcc",
+                                       colour = "#000000",
                                        box.padding = 0.35,
                                        segment.size = 0.25,
-                                       segment.colour = "#08306b",
+                                       segment.colour = "#444444",
                                        min.segment.length = 0,
                                        max.overlaps = 200)
   } else {
-    p <- p + geom_label(data = labdf, aes(X, Y, label = label), size = 4.2, fontface = "bold", fill = "#ffffff", colour = "#08306b", label.r = unit(0.15, "lines"))
+    p <- p + geom_label(data = labdf, aes(X, Y, label = label), size = 4.2, fontface = "bold", fill = "#ffffff", colour = "#000000", label.r = unit(0.15, "lines"))
   }
 }
 
 print(p)
 ```
 
-```{r plot-bw, fig.height=7, fig.width=11}
-# Greyscale map (no title) — useful for print or monochrome displays
+## Plot legal system families
+
+```{r plot-legal-system, fig.height=7, fig.width=11}
 map_data_no_antar <- map_data[!grepl("antar", map_data$name), ]
 
-p_bw <- ggplot() +
-  geom_sf(data = map_data_no_antar, fill = "#f0f0f0", colour = "#d0d0d0", size = 0.08) +
-  geom_sf(data = subset(map_data_no_antar, covered), fill = "#4b4b4b", colour = "#000000", size = 0.2, alpha = 0.95) +
+  p_legal <- ggplot(map_data_no_antar) +
+    geom_sf(aes(fill = legal_system), colour = "#d0d0d0", size = 0.08) +
+    scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
+    labs(
+      title = "Legal System",
+      fill = "Legal System Family"
+    ) +
+    coord_sf(expand = FALSE) +
+    theme_void() +
+    theme(
+      plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
+      plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
+      legend.position = "right"
+    )
+
+  print(p_legal)
+  
+  # a blank one as need to find out singapore 
+
+```
+
+## Plot alcohol policy status
+
+```{r plot-alcohol-policy, fig.height=7, fig.width=11}
+
+p_policy <- ggplot(map_data_no_antar) +
+  geom_sf(aes(fill = alcohol_policy_status), colour = "#d0d0d0", size = 0.08) +
+  scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
+  labs(
+      title = "Alcohol Policy Status",
+      subtitle = "National alcohol legislation/policy coding",
+      fill = "Alcohol Policy Status"
+    ) +
+    coord_sf(expand = FALSE) +
+    theme_void() +
+    theme(
+      plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
+      plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
+      legend.position = "right"
+    )
+```
+
+## Plot other legal/alcohol indicators
+
+```{r plot-min-age-on, fig.height=7, fig.width=11}
+p_min_on <- ggplot(map_data_no_antar) +
+  geom_sf(aes(fill = min_purchase_age_on_premise), colour = "#d0d0d0", size = 0.08) +
+  scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
+  labs(title = "Minimum Purchase Age (On Premise)", 
+       fill = "Minimum Age On Premise") +
   coord_sf(expand = FALSE) +
   theme_void() +
-  theme(
-    panel.background = element_rect(fill = "#ffffff", colour = NA),
-    plot.background = element_rect(fill = "#ffffff", colour = NA),
-    legend.position = "none"
-  )
+  theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
+        plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
+        legend.position = "right")
 
-# Add labels (greyscale)
-covered_sf <- subset(map_data_no_antar, covered)
-if (nrow(covered_sf) > 0) {
-  pts <- st_point_on_surface(covered_sf)
-  pts$label <- tools::toTitleCase(covered_sf$name)
-  coords <- st_coordinates(pts)
-  labdf <- data.frame(X = coords[,1], Y = coords[,2], label = pts$label, stringsAsFactors = FALSE)
-  if (requireNamespace("ggrepel", quietly = TRUE)) {
-    p_bw <- p_bw + ggrepel::geom_label_repel(data = labdf, aes(X, Y, label = label),
-                                            size = 3.8, fontface = "bold", colour = "#000000",
-                                            fill = "#ffffffcc", box.padding = 0.25, segment.size = 0.22,
-                                            segment.colour = "#444444", min.segment.length = 0, max.overlaps = 200)
-  } else {
-    p_bw <- p_bw + geom_label(data = labdf, aes(X, Y, label = label), size = 4, fontface = "bold", fill = "#ffffff", colour = "#000000", label.r = unit(0.15, "lines"))
-  }
-}
+  print(p_min_on)
 
-print(p_bw)
+```
+
+```{r plot-min-age-off, fig.height=7, fig.width=11}
+
+  p_min_off <- ggplot(map_data_no_antar) +
+    geom_sf(aes(fill = min_purchase_age_off_premise), colour = "#d0d0d0", size = 0.08) +
+    scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
+    labs(title = "Minimum Purchase Age (Off Premise)", fill = "Minimum Age Off Premise") +
+    coord_sf(expand = FALSE) +
+    theme_void() +
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
+          plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
+          legend.position = "right")
+
+  print(p_min_off)
+  
+```
+
+```{r plot-bac-general, fig.height=7, fig.width=11}
+
+  p_bac_general <- ggplot(map_data_no_antar) +
+    geom_sf(aes(fill = bac_limit_general_pop_per_l), colour = "#d0d0d0", size = 0.08) +
+    scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
+    labs(title = "BAC Limit (General Population)", subtitle = "Indicator: bac_limit_general_pop_per_l", fill = "BAC General") +
+    coord_sf(expand = FALSE) +
+    theme_void() +
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
+          plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
+          legend.position = "right")
+
+  print(p_bac_general)
+  
+```
+
+```{r plot-bac-young, fig.height=7, fig.width=11}
+
+  p_bac_young <- ggplot(map_data_no_antar) +
+    geom_sf(aes(fill = bac_limit_young_drivers_per_l), colour = "#d0d0d0", size = 0.08) +
+    scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
+    labs(title = "BAC Limit (Young Drivers)", subtitle = "Indicator: bac_limit_young_drivers_per_l", fill = "BAC Young Drivers") +
+    coord_sf(expand = FALSE) +
+    theme_void() +
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
+          plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
+          legend.position = "right")
+
+  print(p_bac_young)
+  
+```
+
+```{r plot-bac-prof, fig.height=7, fig.width=11}
+
+  p_bac_prof <- ggplot(map_data_no_antar) +
+    geom_sf(aes(fill = bac_limit_prof_drivers_per_l), colour = "#d0d0d0", size = 0.08) +
+    scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
+    labs(title = "BAC Limit (Professional Drivers)", subtitle = "Indicator: bac_limit_prof_drivers_per_l", fill = "BAC Professional") +
+    coord_sf(expand = FALSE) +
+    theme_void() +
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
+          plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
+          legend.position = "right")
+
+  print(p_bac_prof)
+
+```
+
+```{r plot-breath-testing, fig.height=7, fig.width=11}
+
+  p_rbt <- ggplot(map_data_no_antar) +
+    geom_sf(aes(fill = random_breath_testing), colour = "#d0d0d0", size = 0.08) +
+    scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
+    labs(title = "Random Breath Testing", subtitle = "Indicator: random_breath_testing", fill = "Random Breath Testing") +
+    coord_sf(expand = FALSE) +
+    theme_void() +
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
+          plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
+          legend.position = "right")
+
+  print(p_rbt)
+
+```
+
+```{r plot-national-strategy, fig.height=7, fig.width=11}
+
+  p_strategy <- ggplot(map_data_no_antar) +
+    geom_sf(aes(fill = national_alcohol_strategy_written_adopted), colour = "#d0d0d0", size = 0.08) +
+    scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
+    labs(title = "National Alcohol Strategy (Written & Adopted)", subtitle = "Indicator: national_alcohol_strategy_written_adopted", fill = "National Strategy") +
+    coord_sf(expand = FALSE) +
+    theme_void() +
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
+          plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
+          legend.position = "right")
+
+  print(p_strategy)
+
+```
+
+```{r plot-illegal-alcohol-legislation, fig.height=7, fig.width=11}
+
+  p_illegal <- ggplot(map_data_no_antar) +
+    geom_sf(aes(fill = primary_legislation_illegal_alcohol), colour = "#d0d0d0", size = 0.08) +
+    scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
+    labs(title = "Primary Legislation for Illegal Alcohol", subtitle = "Indicator: primary_legislation_illegal_alcohol", fill = "Illegal Alcohol Legislation") +
+    coord_sf(expand = FALSE) +
+    theme_void() +
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
+          plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
+          legend.position = "right")
+
+  print(p_illegal)
+
 ```
 
 ## Quick edit: add or edit variables
@@ -237,9 +400,7 @@ print(p_bw)
 You can add or edit extra variables simply by editing `map_data` in R and saving a copy if you want to persist changes. Example:
 
 ```{r edit-example}
-# Example: mark a few countries as having specialist courts and save a working copy
-map_data$legal_system_type[map_data$name %in% c("singapore")] <- "common law"
-map_data$specialist_substance_use_courts[map_data$name %in% c("singapore")] <- "yes"
+# Example: update in-session metadata manually
+map_data$legal_system_family[map_data$name %in% c("singapore")] <- "common law"
+map_data$alcohol_policy_status[map_data$name %in% c("singapore")] <- "in place"
 ```
-
-
