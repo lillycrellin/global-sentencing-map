@@ -1,9 +1,7 @@
 Simple map-data package
 
-This folder is set up for two tasks:
+This project is set up to build and plot country-speicifc alcohol consumption policy maps in Quarto.
 
-1. Building/plotting country policy maps in Quarto.
-2. Maintaining a clean, hyperlinked source register.
 
 ## Relevant structure
 
@@ -22,21 +20,11 @@ This folder is set up for two tasks:
 
    `quarto render map_world.qmd`
 
-## Quick start (sources)
-
-Run from project root:
-
-`python3 tidy_sources_hyperlinked.py`
-
-This updates both:
-
-- `Sources_hyperlinked.csv`
-- `Sources_hyperlinked.xlsx`
 
 ## Notes
 
 - The Quarto workflow rebuilds spatial data directly from included shapefiles (no cache dependency).
 - Keep country names human-readable in `data/legal_alcohol_policy.csv`; the Quarto code normalises common aliases.
-- In `Sources_hyperlinked.csv`, rows marked `URL_Status = Check URL` need manual URL correction.
+
 
 
