@@ -57,7 +57,7 @@ if (!file.exists(policy_path)) {
   stop("Policy file not found at ", policy_path)
 }
 
-policy_df <- read.csv(policy_path, stringsAsFactors = FALSE)
+policy_df <- read.csv(policy_path, stringsAsFactors = FALSE, check.names = FALSE)
 names(policy_df) <- tolower(names(policy_df))
 
 required_cols <- c("country")
@@ -74,6 +74,13 @@ if ("covered" %in% names(policy_df)) {
   policy_df$covered_policy <- cvals %in% c("y", "yes", "true", "1")
 } else {
   policy_df$covered_policy <- TRUE
+}
+
+# clean character fields for consistent joins and legends
+char_cols <- names(policy_df)[vapply(policy_df, is.character, logical(1))]
+for (col in char_cols) {
+  policy_df[[col]] <- trimws(policy_df[[col]])
+  policy_df[[col]][policy_df[[col]] == ""] <- NA
 }
 
 policy_country_names <- unique(policy_df$country_std)
@@ -134,7 +141,28 @@ map_data <- map_data %>%
 
 map_data$covered <- ifelse(is.na(map_data$covered_policy), map_data$covered, map_data$covered_policy)
 
+simplify_for_plot <- function(x) {
+  x_valid <- suppressWarnings(sf::st_make_valid(x))
+
+  if (requireNamespace("rmapshaper", quietly = TRUE)) {
+    return(rmapshaper::ms_simplify(x_valid, keep = 0.08, keep_shapes = TRUE))
+  }
+
+  crs_orig <- sf::st_crs(x_valid)
+  x_work <- if (sf::st_is_longlat(x_valid)) sf::st_transform(x_valid, 3857) else x_valid
+  x_simpl <- sf::st_simplify(x_work, dTolerance = 15000, preserveTopology = TRUE)
+
+  if (!is.na(crs_orig) && sf::st_crs(x_simpl) != crs_orig) {
+    x_simpl <- sf::st_transform(x_simpl, crs_orig)
+  }
+
+  x_simpl
+}
+
+map_plot_data <- simplify_for_plot(map_data)
+
 message("Built working dataset: map_data (rows = ", nrow(map_data), ")")
+message("Built simplified plotting dataset: map_plot_data (rows = ", nrow(map_plot_data), ")")
 
 ```
 
@@ -163,7 +191,7 @@ if (length(unmatched) > 0) {
 
 ```{r plot, fig.height=7, fig.width=11}
 # remove Antarctica (and similar polar features) which distorts the map
-map_data_no_antar <- map_data[!grepl("antar", map_data$name), ]
+map_data_no_antar <- map_plot_data[!grepl("antar", map_plot_data$name), ]
 
 if (!("covered" %in% names(map_data_no_antar))) {
   map_data_no_antar$covered <- FALSE
@@ -218,189 +246,719 @@ if (nrow(covered_sf) > 0) {
 print(p)
 ```
 
-## Plot legal system families
+## Individual variable maps
+
+```{r map-helpers, fig.height=7, fig.width=11}
+map_data_no_antar <- map_plot_data[!grepl("antar", map_plot_data$name), ]
+pattern_pool <- c("stripe", "crosshatch", "circle", "wave", "none")
+uk_xlim <- c(-11, 3)
+uk_ylim <- c(49, 61)
+uk_focus_names <- c("england", "wales", "scotland", "northern ireland")
+
+add_uk_emphasis <- function(p_main, plot_df, selected_df) {
+  uk_outline_df <- plot_df[plot_df$name %in% uk_focus_names, ]
+  p_main +
+    geom_sf(data = uk_outline_df, fill = NA, colour = "#000000", linewidth = 0.45, show.legend = FALSE) +
+    theme(legend.position = "bottom")
+}
+
+prepare_map_values <- function(df, var_name) {
+  vals <- if (var_name %in% names(df)) {
+    trimws(as.character(df[[var_name]]))
+  } else {
+    rep(NA_character_, nrow(df))
+  }
+
+  vals_lower <- tolower(vals)
+  vals[vals_lower %in% c("yes", "y")] <- "Yes"
+  vals[vals_lower %in% c("no", "n")] <- "No"
+  vals[vals_lower %in% c("yes (by state)", "yes by state")] <- "Yes (by state)"
+  vals[vals_lower %in% c("spirits only", "yes (for spirits only)", "yes for spirits only", "yes - spirits only")] <- "Yes (for spirits only)"
+
+  vals[is.na(vals) | vals == ""] <- "No data"
+  vals[vals == "No data"] <- "No"
+  factor(vals)
+}
+
+make_style_values <- function(levels_vec) {
+  levels_vec <- as.character(levels_vec)
+  visible_patterns <- c("stripe", "crosshatch", "circle", "wave")
+  visible_fills <- c("#d9d9d9", "#bdbdbd", "#969696", "#737373", "#525252", "#252525")
+
+  pattern_values <- stats::setNames(rep("stripe", length(levels_vec)), levels_vec)
+  fill_values <- stats::setNames(rep("#d9d9d9", length(levels_vec)), levels_vec)
+
+  other_levels <- setdiff(levels_vec, c("Yes", "Yes (by state)", "No"))
+  if (length(other_levels) > 0) {
+    pattern_values[other_levels] <- rep(visible_patterns, length.out = length(other_levels))
+    fill_values[other_levels] <- rep(visible_fills, length.out = length(other_levels))
+  }
+
+  if ("Yes" %in% levels_vec) {
+    pattern_values["Yes"] <- "stripe"
+    fill_values["Yes"] <- "#bdbdbd"
+  }
+  if ("Yes (by state)" %in% levels_vec) {
+    pattern_values["Yes (by state)"] <- "crosshatch"
+    fill_values["Yes (by state)"] <- "#737373"
+  }
+  if ("Yes (for spirits only)" %in% levels_vec) {
+    pattern_values["Yes (for spirits only)"] <- "circle"
+    fill_values["Yes (for spirits only)"] <- "#525252"
+  }
+  if ("No" %in% levels_vec) {
+    pattern_values["No"] <- "none"
+    fill_values["No"] <- "#000000"
+  }
+
+  list(pattern_values = pattern_values, fill_values = fill_values)
+}
+
+required_map_vars <- c(
+  "legal_system",
+  "specialist_substance_use_courts",
+  "alcohol_treatment_requirements",
+  "alcohol_tagging_requirements",
+  "min_purchase_age_on_premise",
+  "min_purchase_age_off_premise",
+  "bac_limit_general_pop_per_l",
+  "bac_limit_young_drivers_per_l",
+  "bac_limit_prof_drivers_per_l",
+  "random_breath_testing",
+  "national_alcohol_strategy_written_adopted",
+  "primary_legislation_illegal_alcohol",
+  "national_system_monitoring_consumption",
+  "national_system_monitoring_health_consequence",
+  "national_system_monitoring_social_consequence",
+  "national_system_monitoring_policy_response",
+  "average_daily_intake_grams_pop_15+_bothsex"
+)
+
+missing_map_vars <- setdiff(required_map_vars, names(map_data_no_antar))
+if (length(missing_map_vars) > 0) {
+  warning(
+    "Missing expected map variable(s): ",
+    paste(missing_map_vars, collapse = ", "),
+    ". These maps will render as 'No' until the columns are added."
+  )
+}
+```
 
 ```{r plot-legal-system, fig.height=7, fig.width=11}
-map_data_no_antar <- map_data[!grepl("antar", map_data$name), ]
+plot_df <- map_data_no_antar
+plot_df$map_value <- prepare_map_values(plot_df, "legal_system")
+selected_df <- plot_df[!is.na(plot_df$covered) & plot_df$covered, ]
 
-  p_legal <- ggplot(map_data_no_antar) +
-    geom_sf(aes(fill = legal_system), colour = "#d0d0d0", size = 0.08) +
-    scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
-    labs(
-      title = "Legal System",
-      fill = "Legal System Family"
+if (requireNamespace("ggpattern", quietly = TRUE)) {
+  lvls <- levels(selected_df$map_value)
+  style_values <- make_style_values(lvls)
+  pattern_values <- style_values$pattern_values
+  fill_values <- style_values$fill_values
+  p_legal <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    ggpattern::geom_sf_pattern(data = selected_df, aes(pattern = map_value, fill = map_value), colour = "#7f7f7f", size = 0.15,
+                               pattern_fill = "#1f1f1f", pattern_colour = "#1f1f1f", pattern_density = 0.45,
+                               pattern_spacing = 0.025, pattern_key_scale_factor = 0.7) +
+    ggpattern::scale_pattern_manual(values = pattern_values, drop = FALSE, name = "Legal System") +
+    scale_fill_manual(values = fill_values, drop = FALSE, name = "Legal System")
+} else {
+  p_legal <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    geom_sf(data = selected_df, aes(fill = map_value), colour = "#7f7f7f", size = 0.15) +
+    scale_fill_manual(values = make_style_values(levels(selected_df$map_value))$fill_values, drop = FALSE, name = "Legal System")
+}
+
+print(add_uk_emphasis(
+  p_legal +
+    labs(title = "Legal System") +
+    coord_sf(expand = FALSE) +
+    theme_void() +
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)), legend.position = "right"),
+  plot_df = plot_df,
+  selected_df = selected_df
+))
+```
+
+```{r plot-specialist-courts, fig.height=7, fig.width=11}
+plot_df <- map_data_no_antar
+plot_df$map_value <- prepare_map_values(plot_df, "specialist_substance_use_courts")
+selected_df <- plot_df[!is.na(plot_df$covered) & plot_df$covered, ]
+
+if (requireNamespace("ggpattern", quietly = TRUE)) {
+  lvls <- levels(selected_df$map_value)
+  style_values <- make_style_values(lvls)
+  pattern_values <- style_values$pattern_values
+  fill_values <- style_values$fill_values
+  p_courts <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    ggpattern::geom_sf_pattern(data = selected_df, aes(pattern = map_value, fill = map_value), colour = "#7f7f7f", size = 0.15,
+                               pattern_fill = "#1f1f1f", pattern_colour = "#1f1f1f", pattern_density = 0.45,
+                               pattern_spacing = 0.025, pattern_key_scale_factor = 0.7) +
+    ggpattern::scale_pattern_manual(values = pattern_values, drop = FALSE, name = "Specialist Courts") +
+    scale_fill_manual(values = fill_values, drop = FALSE, name = "Specialist Courts")
+} else {
+  p_courts <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    geom_sf(data = selected_df, aes(fill = map_value), colour = "#7f7f7f", size = 0.15) +
+    scale_fill_manual(values = make_style_values(levels(selected_df$map_value))$fill_values, drop = FALSE, name = "Specialist Courts")
+}
+
+print(add_uk_emphasis(
+  p_courts +
+    labs(title = "Specialist Substance Use Courts") +
+    coord_sf(expand = FALSE) +
+    theme_void() +
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)), legend.position = "right"),
+  plot_df = plot_df,
+  selected_df = selected_df
+))
+```
+
+```{r plot-treatment, fig.height=7, fig.width=11}
+plot_df <- map_data_no_antar
+plot_df$map_value <- prepare_map_values(plot_df, "alcohol_treatment_requirements")
+selected_df <- plot_df[!is.na(plot_df$covered) & plot_df$covered, ]
+
+if (requireNamespace("ggpattern", quietly = TRUE)) {
+  lvls <- levels(selected_df$map_value)
+  style_values <- make_style_values(lvls)
+  pattern_values <- style_values$pattern_values
+  fill_values <- style_values$fill_values
+  p_treat <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    ggpattern::geom_sf_pattern(data = selected_df, aes(pattern = map_value, fill = map_value), colour = "#7f7f7f", size = 0.15,
+                               pattern_fill = "#1f1f1f", pattern_colour = "#1f1f1f", pattern_density = 0.45,
+                               pattern_spacing = 0.025, pattern_key_scale_factor = 0.7) +
+    ggpattern::scale_pattern_manual(values = pattern_values, drop = FALSE, name = "Treatment Requirements") +
+    scale_fill_manual(values = fill_values, drop = FALSE, name = "Treatment Requirements")
+} else {
+  p_treat <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    geom_sf(data = selected_df, aes(fill = map_value), colour = "#7f7f7f", size = 0.15) +
+    scale_fill_manual(values = make_style_values(levels(selected_df$map_value))$fill_values, drop = FALSE, name = "Treatment Requirements")
+}
+
+print(add_uk_emphasis(
+  p_treat +
+    labs(title = "Alcohol Treatment Requirements") +
+    coord_sf(expand = FALSE) +
+    theme_void() +
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)), legend.position = "right"),
+  plot_df = plot_df,
+  selected_df = selected_df
+))
+```
+
+```{r plot-tagging, fig.height=7, fig.width=11}
+plot_df <- map_data_no_antar
+plot_df$map_value <- prepare_map_values(plot_df, "alcohol_tagging_requirements")
+selected_df <- plot_df[!is.na(plot_df$covered) & plot_df$covered, ]
+
+if (requireNamespace("ggpattern", quietly = TRUE)) {
+  lvls <- levels(selected_df$map_value)
+  style_values <- make_style_values(lvls)
+  pattern_values <- style_values$pattern_values
+  fill_values <- style_values$fill_values
+  p_tag <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    ggpattern::geom_sf_pattern(data = selected_df, aes(pattern = map_value, fill = map_value), colour = "#7f7f7f", size = 0.15,
+                               pattern_fill = "#1f1f1f", pattern_colour = "#1f1f1f", pattern_density = 0.45,
+                               pattern_spacing = 0.025, pattern_key_scale_factor = 0.7) +
+    ggpattern::scale_pattern_manual(values = pattern_values, drop = FALSE, name = "Tagging Requirements") +
+    scale_fill_manual(values = fill_values, drop = FALSE, name = "Tagging Requirements")
+} else {
+  p_tag <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    geom_sf(data = selected_df, aes(fill = map_value), colour = "#7f7f7f", size = 0.15) +
+    scale_fill_manual(values = make_style_values(levels(selected_df$map_value))$fill_values, drop = FALSE, name = "Tagging Requirements")
+}
+
+print(add_uk_emphasis(
+  p_tag +
+    labs(title = "Alcohol Tagging Requirements") +
+    guides(
+      pattern = guide_legend(ncol = 1, byrow = TRUE),
+      fill = guide_legend(
+        ncol = 1,
+        byrow = TRUE,
+        label.hjust = 0,
+        label.theme = element_text(size = 7, lineheight = 0.9)
+      )
     ) +
     coord_sf(expand = FALSE) +
     theme_void() +
     theme(
       plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
-      plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
-      legend.position = "right"
-    )
-
-  print(p_legal)
-  
-  # a blank one as need to find out singapore 
-
+      legend.position = "bottom",
+      legend.title = element_text(size = 9),
+      legend.text = element_text(size = 7)
+    ),
+  plot_df = plot_df,
+  selected_df = selected_df
+))
 ```
-
-## Plot alcohol policy status
-
-```{r plot-alcohol-policy, fig.height=7, fig.width=11}
-
-p_policy <- ggplot(map_data_no_antar) +
-  geom_sf(aes(fill = alcohol_policy_status), colour = "#d0d0d0", size = 0.08) +
-  scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
-  labs(
-      title = "Alcohol Policy Status",
-      subtitle = "National alcohol legislation/policy coding",
-      fill = "Alcohol Policy Status"
-    ) +
-    coord_sf(expand = FALSE) +
-    theme_void() +
-    theme(
-      plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
-      plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
-      legend.position = "right"
-    )
-```
-
-## Plot other legal/alcohol indicators
 
 ```{r plot-min-age-on, fig.height=7, fig.width=11}
-p_min_on <- ggplot(map_data_no_antar) +
-  geom_sf(aes(fill = min_purchase_age_on_premise), colour = "#d0d0d0", size = 0.08) +
-  scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
-  labs(title = "Minimum Purchase Age (On Premise)", 
-       fill = "Minimum Age On Premise") +
-  coord_sf(expand = FALSE) +
-  theme_void() +
-  theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
-        plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
-        legend.position = "right")
+plot_df <- map_data_no_antar
+plot_df$map_value <- prepare_map_values(plot_df, "min_purchase_age_on_premise")
+selected_df <- plot_df[!is.na(plot_df$covered) & plot_df$covered, ]
 
-  print(p_min_on)
+if (requireNamespace("ggpattern", quietly = TRUE)) {
+  lvls <- levels(selected_df$map_value)
+  style_values <- make_style_values(lvls)
+  pattern_values <- style_values$pattern_values
+  fill_values <- style_values$fill_values
+  p_min_on <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    ggpattern::geom_sf_pattern(data = selected_df, aes(pattern = map_value, fill = map_value), colour = "#7f7f7f", size = 0.15,
+                               pattern_fill = "#1f1f1f", pattern_colour = "#1f1f1f", pattern_density = 0.45,
+                               pattern_spacing = 0.025, pattern_key_scale_factor = 0.7) +
+    ggpattern::scale_pattern_manual(values = pattern_values, drop = FALSE, name = "Minimum Age On Premise") +
+    scale_fill_manual(values = fill_values, drop = FALSE, name = "Minimum Age On Premise")
+} else {
+  p_min_on <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    geom_sf(data = selected_df, aes(fill = map_value), colour = "#7f7f7f", size = 0.15) +
+    scale_fill_manual(values = make_style_values(levels(selected_df$map_value))$fill_values, drop = FALSE, name = "Minimum Age On Premise")
+}
 
+print(add_uk_emphasis(
+  p_min_on +
+    labs(title = "Minimum Purchase Age (On Premise)") +
+    coord_sf(expand = FALSE) +
+    theme_void() +
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)), legend.position = "right"),
+  plot_df = plot_df,
+  selected_df = selected_df
+))
 ```
 
 ```{r plot-min-age-off, fig.height=7, fig.width=11}
+plot_df <- map_data_no_antar
+plot_df$map_value <- prepare_map_values(plot_df, "min_purchase_age_off_premise")
+selected_df <- plot_df[!is.na(plot_df$covered) & plot_df$covered, ]
 
-  p_min_off <- ggplot(map_data_no_antar) +
-    geom_sf(aes(fill = min_purchase_age_off_premise), colour = "#d0d0d0", size = 0.08) +
-    scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
-    labs(title = "Minimum Purchase Age (Off Premise)", fill = "Minimum Age Off Premise") +
+if (requireNamespace("ggpattern", quietly = TRUE)) {
+  lvls <- levels(selected_df$map_value)
+  style_values <- make_style_values(lvls)
+  pattern_values <- style_values$pattern_values
+  fill_values <- style_values$fill_values
+  p_min_off <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    ggpattern::geom_sf_pattern(data = selected_df, aes(pattern = map_value, fill = map_value), colour = "#7f7f7f", size = 0.15,
+                               pattern_fill = "#1f1f1f", pattern_colour = "#1f1f1f", pattern_density = 0.45,
+                               pattern_spacing = 0.025, pattern_key_scale_factor = 0.7) +
+    ggpattern::scale_pattern_manual(values = pattern_values, drop = FALSE, name = "Minimum Age Off Premise") +
+    scale_fill_manual(values = fill_values, drop = FALSE, name = "Minimum Age Off Premise")
+} else {
+  p_min_off <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    geom_sf(data = selected_df, aes(fill = map_value), colour = "#7f7f7f", size = 0.15) +
+    scale_fill_manual(values = make_style_values(levels(selected_df$map_value))$fill_values, drop = FALSE, name = "Minimum Age Off Premise")
+}
+
+print(add_uk_emphasis(
+  p_min_off +
+    labs(title = "Minimum Purchase Age (Off Premise)") +
     coord_sf(expand = FALSE) +
     theme_void() +
-    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
-          plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
-          legend.position = "right")
-
-  print(p_min_off)
-  
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)), legend.position = "right"),
+  plot_df = plot_df,
+  selected_df = selected_df
+))
 ```
 
 ```{r plot-bac-general, fig.height=7, fig.width=11}
+plot_df <- map_data_no_antar
+plot_df$map_value <- prepare_map_values(plot_df, "bac_limit_general_pop_per_l")
+selected_df <- plot_df[!is.na(plot_df$covered) & plot_df$covered, ]
 
-  p_bac_general <- ggplot(map_data_no_antar) +
-    geom_sf(aes(fill = bac_limit_general_pop_per_l), colour = "#d0d0d0", size = 0.08) +
-    scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
-    labs(title = "BAC Limit (General Population)", subtitle = "Indicator: bac_limit_general_pop_per_l", fill = "BAC General") +
+if (requireNamespace("ggpattern", quietly = TRUE)) {
+  lvls <- levels(selected_df$map_value)
+  style_values <- make_style_values(lvls)
+  pattern_values <- style_values$pattern_values
+  fill_values <- style_values$fill_values
+  p_bac_general <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    ggpattern::geom_sf_pattern(data = selected_df, aes(pattern = map_value, fill = map_value), colour = "#7f7f7f", size = 0.15,
+                               pattern_fill = "#1f1f1f", pattern_colour = "#1f1f1f", pattern_density = 0.45,
+                               pattern_spacing = 0.025, pattern_key_scale_factor = 0.7) +
+    ggpattern::scale_pattern_manual(values = pattern_values, drop = FALSE, name = "BAC General") +
+    scale_fill_manual(values = fill_values, drop = FALSE, name = "BAC General")
+} else {
+  p_bac_general <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    geom_sf(data = selected_df, aes(fill = map_value), colour = "#7f7f7f", size = 0.15) +
+    scale_fill_manual(values = make_style_values(levels(selected_df$map_value))$fill_values, drop = FALSE, name = "BAC General")
+}
+
+print(add_uk_emphasis(
+  p_bac_general +
+    labs(title = "BAC Limit (General Population)") +
     coord_sf(expand = FALSE) +
     theme_void() +
-    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
-          plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
-          legend.position = "right")
-
-  print(p_bac_general)
-  
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)), legend.position = "right"),
+  plot_df = plot_df,
+  selected_df = selected_df
+))
 ```
 
 ```{r plot-bac-young, fig.height=7, fig.width=11}
+plot_df <- map_data_no_antar
+plot_df$map_value <- prepare_map_values(plot_df, "bac_limit_young_drivers_per_l")
+selected_df <- plot_df[!is.na(plot_df$covered) & plot_df$covered, ]
 
-  p_bac_young <- ggplot(map_data_no_antar) +
-    geom_sf(aes(fill = bac_limit_young_drivers_per_l), colour = "#d0d0d0", size = 0.08) +
-    scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
-    labs(title = "BAC Limit (Young Drivers)", subtitle = "Indicator: bac_limit_young_drivers_per_l", fill = "BAC Young Drivers") +
+if (requireNamespace("ggpattern", quietly = TRUE)) {
+  lvls <- levels(selected_df$map_value)
+  style_values <- make_style_values(lvls)
+  pattern_values <- style_values$pattern_values
+  fill_values <- style_values$fill_values
+  p_bac_young <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    ggpattern::geom_sf_pattern(data = selected_df, aes(pattern = map_value, fill = map_value), colour = "#7f7f7f", size = 0.15,
+                               pattern_fill = "#1f1f1f", pattern_colour = "#1f1f1f", pattern_density = 0.45,
+                               pattern_spacing = 0.025, pattern_key_scale_factor = 0.7) +
+    ggpattern::scale_pattern_manual(values = pattern_values, drop = FALSE, name = "BAC Young Drivers") +
+    scale_fill_manual(values = fill_values, drop = FALSE, name = "BAC Young Drivers")
+} else {
+  p_bac_young <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    geom_sf(data = selected_df, aes(fill = map_value), colour = "#7f7f7f", size = 0.15) +
+    scale_fill_manual(values = make_style_values(levels(selected_df$map_value))$fill_values, drop = FALSE, name = "BAC Young Drivers")
+}
+
+print(add_uk_emphasis(
+  p_bac_young +
+    labs(title = "BAC Limit (Young Drivers)") +
     coord_sf(expand = FALSE) +
     theme_void() +
-    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
-          plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
-          legend.position = "right")
-
-  print(p_bac_young)
-  
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)), legend.position = "right"),
+  plot_df = plot_df,
+  selected_df = selected_df
+))
 ```
 
 ```{r plot-bac-prof, fig.height=7, fig.width=11}
+plot_df <- map_data_no_antar
+plot_df$map_value <- prepare_map_values(plot_df, "bac_limit_prof_drivers_per_l")
+selected_df <- plot_df[!is.na(plot_df$covered) & plot_df$covered, ]
 
-  p_bac_prof <- ggplot(map_data_no_antar) +
-    geom_sf(aes(fill = bac_limit_prof_drivers_per_l), colour = "#d0d0d0", size = 0.08) +
-    scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
-    labs(title = "BAC Limit (Professional Drivers)", subtitle = "Indicator: bac_limit_prof_drivers_per_l", fill = "BAC Professional") +
+if (requireNamespace("ggpattern", quietly = TRUE)) {
+  lvls <- levels(selected_df$map_value)
+  style_values <- make_style_values(lvls)
+  pattern_values <- style_values$pattern_values
+  fill_values <- style_values$fill_values
+  p_bac_prof <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    ggpattern::geom_sf_pattern(data = selected_df, aes(pattern = map_value, fill = map_value), colour = "#7f7f7f", size = 0.15,
+                               pattern_fill = "#1f1f1f", pattern_colour = "#1f1f1f", pattern_density = 0.45,
+                               pattern_spacing = 0.025, pattern_key_scale_factor = 0.7) +
+    ggpattern::scale_pattern_manual(values = pattern_values, drop = FALSE, name = "BAC Professional") +
+    scale_fill_manual(values = fill_values, drop = FALSE, name = "BAC Professional")
+} else {
+  p_bac_prof <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    geom_sf(data = selected_df, aes(fill = map_value), colour = "#7f7f7f", size = 0.15) +
+    scale_fill_manual(values = make_style_values(levels(selected_df$map_value))$fill_values, drop = FALSE, name = "BAC Professional")
+}
+
+print(add_uk_emphasis(
+  p_bac_prof +
+    labs(title = "BAC Limit (Professional Drivers)") +
     coord_sf(expand = FALSE) +
     theme_void() +
-    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
-          plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
-          legend.position = "right")
-
-  print(p_bac_prof)
-
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)), legend.position = "right"),
+  plot_df = plot_df,
+  selected_df = selected_df
+))
 ```
 
 ```{r plot-breath-testing, fig.height=7, fig.width=11}
+plot_df <- map_data_no_antar
+plot_df$map_value <- prepare_map_values(plot_df, "random_breath_testing")
+selected_df <- plot_df[!is.na(plot_df$covered) & plot_df$covered, ]
 
-  p_rbt <- ggplot(map_data_no_antar) +
-    geom_sf(aes(fill = random_breath_testing), colour = "#d0d0d0", size = 0.08) +
-    scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
-    labs(title = "Random Breath Testing", subtitle = "Indicator: random_breath_testing", fill = "Random Breath Testing") +
+if (requireNamespace("ggpattern", quietly = TRUE)) {
+  lvls <- levels(selected_df$map_value)
+  style_values <- make_style_values(lvls)
+  pattern_values <- style_values$pattern_values
+  fill_values <- style_values$fill_values
+  p_rbt <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    ggpattern::geom_sf_pattern(data = selected_df, aes(pattern = map_value, fill = map_value), colour = "#7f7f7f", size = 0.15,
+                               pattern_fill = "#1f1f1f", pattern_colour = "#1f1f1f", pattern_density = 0.45,
+                               pattern_spacing = 0.025, pattern_key_scale_factor = 0.7) +
+    ggpattern::scale_pattern_manual(values = pattern_values, drop = FALSE, name = "Random Breath Testing") +
+    scale_fill_manual(values = fill_values, drop = FALSE, name = "Random Breath Testing")
+} else {
+  p_rbt <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    geom_sf(data = selected_df, aes(fill = map_value), colour = "#7f7f7f", size = 0.15) +
+    scale_fill_manual(values = make_style_values(levels(selected_df$map_value))$fill_values, drop = FALSE, name = "Random Breath Testing")
+}
+
+print(add_uk_emphasis(
+  p_rbt +
+    labs(title = "Random Breath Testing") +
     coord_sf(expand = FALSE) +
     theme_void() +
-    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
-          plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
-          legend.position = "right")
-
-  print(p_rbt)
-
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)), legend.position = "right"),
+  plot_df = plot_df,
+  selected_df = selected_df
+))
 ```
 
 ```{r plot-national-strategy, fig.height=7, fig.width=11}
+plot_df <- map_data_no_antar
+plot_df$map_value <- prepare_map_values(plot_df, "national_alcohol_strategy_written_adopted")
+selected_df <- plot_df[!is.na(plot_df$covered) & plot_df$covered, ]
 
-  p_strategy <- ggplot(map_data_no_antar) +
-    geom_sf(aes(fill = national_alcohol_strategy_written_adopted), colour = "#d0d0d0", size = 0.08) +
-    scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
-    labs(title = "National Alcohol Strategy (Written & Adopted)", subtitle = "Indicator: national_alcohol_strategy_written_adopted", fill = "National Strategy") +
+if (requireNamespace("ggpattern", quietly = TRUE)) {
+  lvls <- levels(selected_df$map_value)
+  style_values <- make_style_values(lvls)
+  pattern_values <- style_values$pattern_values
+  fill_values <- style_values$fill_values
+  p_strategy <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    ggpattern::geom_sf_pattern(data = selected_df, aes(pattern = map_value, fill = map_value), colour = "#7f7f7f", size = 0.15,
+                               pattern_fill = "#1f1f1f", pattern_colour = "#1f1f1f", pattern_density = 0.45,
+                               pattern_spacing = 0.025, pattern_key_scale_factor = 0.7) +
+    ggpattern::scale_pattern_manual(values = pattern_values, drop = FALSE, name = "National Strategy") +
+    scale_fill_manual(values = fill_values, drop = FALSE, name = "National Strategy")
+} else {
+  p_strategy <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    geom_sf(data = selected_df, aes(fill = map_value), colour = "#7f7f7f", size = 0.15) +
+    scale_fill_manual(values = make_style_values(levels(selected_df$map_value))$fill_values, drop = FALSE, name = "National Strategy")
+}
+
+print(add_uk_emphasis(
+  p_strategy +
+    labs(title = "National Alcohol Strategy (Written & Adopted)") +
     coord_sf(expand = FALSE) +
     theme_void() +
-    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
-          plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
-          legend.position = "right")
-
-  print(p_strategy)
-
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)), legend.position = "right"),
+  plot_df = plot_df,
+  selected_df = selected_df
+))
 ```
 
 ```{r plot-illegal-alcohol-legislation, fig.height=7, fig.width=11}
+plot_df <- map_data_no_antar
+plot_df$map_value <- prepare_map_values(plot_df, "primary_legislation_illegal_alcohol")
+selected_df <- plot_df[!is.na(plot_df$covered) & plot_df$covered, ]
 
-  p_illegal <- ggplot(map_data_no_antar) +
-    geom_sf(aes(fill = primary_legislation_illegal_alcohol), colour = "#d0d0d0", size = 0.08) +
-    scale_fill_grey(start = 0.9, end = 0.4, na.value = "#f7f7f7") +
-    labs(title = "Primary Legislation for Illegal Alcohol", subtitle = "Indicator: primary_legislation_illegal_alcohol", fill = "Illegal Alcohol Legislation") +
+if (requireNamespace("ggpattern", quietly = TRUE)) {
+  lvls <- levels(selected_df$map_value)
+  style_values <- make_style_values(lvls)
+  pattern_values <- style_values$pattern_values
+  fill_values <- style_values$fill_values
+  p_illegal <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    ggpattern::geom_sf_pattern(data = selected_df, aes(pattern = map_value, fill = map_value), colour = "#7f7f7f", size = 0.15,
+                               pattern_fill = "#1f1f1f", pattern_colour = "#1f1f1f", pattern_density = 0.45,
+                               pattern_spacing = 0.025, pattern_key_scale_factor = 0.7) +
+    ggpattern::scale_pattern_manual(values = pattern_values, drop = FALSE, name = "Illegal Alcohol Legislation") +
+    scale_fill_manual(values = fill_values, drop = FALSE, name = "Illegal Alcohol Legislation")
+} else {
+  p_illegal <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    geom_sf(data = selected_df, aes(fill = map_value), colour = "#7f7f7f", size = 0.15) +
+    scale_fill_manual(values = make_style_values(levels(selected_df$map_value))$fill_values, drop = FALSE, name = "Illegal Alcohol Legislation")
+}
+
+print(add_uk_emphasis(
+  p_illegal +
+    labs(title = "Primary Legislation for Illegal Alcohol") +
     coord_sf(expand = FALSE) +
     theme_void() +
-    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)),
-          plot.subtitle = element_text(size = 11, margin = margin(b = 8)),
-          legend.position = "right")
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)), legend.position = "right"),
+  plot_df = plot_df,
+  selected_df = selected_df
+))
+```
 
-  print(p_illegal)
+```{r plot-monitoring-consumption, fig.height=7, fig.width=11}
+plot_df <- map_data_no_antar
+plot_df$map_value <- prepare_map_values(plot_df, "national_system_monitoring_consumption")
+selected_df <- plot_df[!is.na(plot_df$covered) & plot_df$covered, ]
 
+if (requireNamespace("ggpattern", quietly = TRUE)) {
+  lvls <- levels(selected_df$map_value)
+  style_values <- make_style_values(lvls)
+  pattern_values <- style_values$pattern_values
+  fill_values <- style_values$fill_values
+  p_mon_cons <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    ggpattern::geom_sf_pattern(data = selected_df, aes(pattern = map_value, fill = map_value), colour = "#7f7f7f", size = 0.15,
+                               pattern_fill = "#1f1f1f", pattern_colour = "#1f1f1f", pattern_density = 0.45,
+                               pattern_spacing = 0.025, pattern_key_scale_factor = 0.7) +
+    ggpattern::scale_pattern_manual(values = pattern_values, drop = FALSE, name = "Monitoring Consumption") +
+    scale_fill_manual(values = fill_values, drop = FALSE, name = "Monitoring Consumption")
+} else {
+  p_mon_cons <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    geom_sf(data = selected_df, aes(fill = map_value), colour = "#7f7f7f", size = 0.15) +
+    scale_fill_manual(values = make_style_values(levels(selected_df$map_value))$fill_values, drop = FALSE, name = "Monitoring Consumption")
+}
+
+print(add_uk_emphasis(
+  p_mon_cons +
+    labs(title = "Monitoring System: Consumption") +
+    coord_sf(expand = FALSE) +
+    theme_void() +
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)), legend.position = "right"),
+  plot_df = plot_df,
+  selected_df = selected_df
+))
+```
+
+```{r plot-monitoring-health, fig.height=7, fig.width=11}
+plot_df <- map_data_no_antar
+plot_df$map_value <- prepare_map_values(plot_df, "national_system_monitoring_health_consequence")
+selected_df <- plot_df[!is.na(plot_df$covered) & plot_df$covered, ]
+
+if (requireNamespace("ggpattern", quietly = TRUE)) {
+  lvls <- levels(selected_df$map_value)
+  style_values <- make_style_values(lvls)
+  pattern_values <- style_values$pattern_values
+  fill_values <- style_values$fill_values
+  p_mon_health <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    ggpattern::geom_sf_pattern(data = selected_df, aes(pattern = map_value, fill = map_value), colour = "#7f7f7f", size = 0.15,
+                               pattern_fill = "#1f1f1f", pattern_colour = "#1f1f1f", pattern_density = 0.45,
+                               pattern_spacing = 0.025, pattern_key_scale_factor = 0.7) +
+    ggpattern::scale_pattern_manual(values = pattern_values, drop = FALSE, name = "Monitoring Health") +
+    scale_fill_manual(values = fill_values, drop = FALSE, name = "Monitoring Health")
+} else {
+  p_mon_health <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    geom_sf(data = selected_df, aes(fill = map_value), colour = "#7f7f7f", size = 0.15) +
+    scale_fill_manual(values = make_style_values(levels(selected_df$map_value))$fill_values, drop = FALSE, name = "Monitoring Health")
+}
+
+print(add_uk_emphasis(
+  p_mon_health +
+    labs(title = "Monitoring System: Health Consequences") +
+    coord_sf(expand = FALSE) +
+    theme_void() +
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)), legend.position = "right"),
+  plot_df = plot_df,
+  selected_df = selected_df
+))
+```
+
+```{r plot-monitoring-social, fig.height=7, fig.width=11}
+plot_df <- map_data_no_antar
+plot_df$map_value <- prepare_map_values(plot_df, "national_system_monitoring_social_consequence")
+selected_df <- plot_df[!is.na(plot_df$covered) & plot_df$covered, ]
+
+if (requireNamespace("ggpattern", quietly = TRUE)) {
+  lvls <- levels(selected_df$map_value)
+  style_values <- make_style_values(lvls)
+  pattern_values <- style_values$pattern_values
+  fill_values <- style_values$fill_values
+  p_mon_social <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    ggpattern::geom_sf_pattern(data = selected_df, aes(pattern = map_value, fill = map_value), colour = "#7f7f7f", size = 0.15,
+                               pattern_fill = "#1f1f1f", pattern_colour = "#1f1f1f", pattern_density = 0.45,
+                               pattern_spacing = 0.025, pattern_key_scale_factor = 0.7) +
+    ggpattern::scale_pattern_manual(values = pattern_values, drop = FALSE, name = "Monitoring Social") +
+    scale_fill_manual(values = fill_values, drop = FALSE, name = "Monitoring Social")
+} else {
+  p_mon_social <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    geom_sf(data = selected_df, aes(fill = map_value), colour = "#7f7f7f", size = 0.15) +
+    scale_fill_manual(values = make_style_values(levels(selected_df$map_value))$fill_values, drop = FALSE, name = "Monitoring Social")
+}
+
+print(add_uk_emphasis(
+  p_mon_social +
+    labs(title = "Monitoring System: Social Consequences") +
+    coord_sf(expand = FALSE) +
+    theme_void() +
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)), legend.position = "right"),
+  plot_df = plot_df,
+  selected_df = selected_df
+))
+```
+
+```{r plot-monitoring-policy, fig.height=7, fig.width=11}
+plot_df <- map_data_no_antar
+plot_df$map_value <- prepare_map_values(plot_df, "national_system_monitoring_policy_response")
+selected_df <- plot_df[!is.na(plot_df$covered) & plot_df$covered, ]
+
+if (requireNamespace("ggpattern", quietly = TRUE)) {
+  lvls <- levels(selected_df$map_value)
+  style_values <- make_style_values(lvls)
+  pattern_values <- style_values$pattern_values
+  fill_values <- style_values$fill_values
+  p_mon_policy <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    ggpattern::geom_sf_pattern(data = selected_df, aes(pattern = map_value, fill = map_value), colour = "#7f7f7f", size = 0.15,
+                               pattern_fill = "#1f1f1f", pattern_colour = "#1f1f1f", pattern_density = 0.45,
+                               pattern_spacing = 0.025, pattern_key_scale_factor = 0.7) +
+    ggpattern::scale_pattern_manual(values = pattern_values, drop = FALSE, name = "Monitoring Policy") +
+    scale_fill_manual(values = fill_values, drop = FALSE, name = "Monitoring Policy")
+} else {
+  p_mon_policy <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    geom_sf(data = selected_df, aes(fill = map_value), colour = "#7f7f7f", size = 0.15) +
+    scale_fill_manual(values = make_style_values(levels(selected_df$map_value))$fill_values, drop = FALSE, name = "Monitoring Policy")
+}
+
+print(add_uk_emphasis(
+  p_mon_policy +
+    labs(title = "Monitoring System: Policy Response") +
+    coord_sf(expand = FALSE) +
+    theme_void() +
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)), legend.position = "right"),
+  plot_df = plot_df,
+  selected_df = selected_df
+))
+```
+
+```{r plot-average-intake, fig.height=7, fig.width=11}
+plot_df <- map_data_no_antar
+plot_df$map_value <- prepare_map_values(plot_df, "average_daily_intake_grams_pop_15+_bothsex")
+selected_df <- plot_df[!is.na(plot_df$covered) & plot_df$covered, ]
+
+if (requireNamespace("ggpattern", quietly = TRUE)) {
+  lvls <- levels(selected_df$map_value)
+  style_values <- make_style_values(lvls)
+  pattern_values <- style_values$pattern_values
+  fill_values <- style_values$fill_values
+  p_intake <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    ggpattern::geom_sf_pattern(data = selected_df, aes(pattern = map_value, fill = map_value), colour = "#7f7f7f", size = 0.15,
+                               pattern_fill = "#1f1f1f", pattern_colour = "#1f1f1f", pattern_density = 0.45,
+                               pattern_spacing = 0.025, pattern_key_scale_factor = 0.7) +
+    ggpattern::scale_pattern_manual(values = pattern_values, drop = FALSE, name = "Average Intake") +
+    scale_fill_manual(values = fill_values, drop = FALSE, name = "Average Intake")
+} else {
+  p_intake <- ggplot() +
+    geom_sf(data = plot_df, fill = "white", colour = "#d0d0d0", size = 0.08) +
+    geom_sf(data = selected_df, aes(fill = map_value), colour = "#7f7f7f", size = 0.15) +
+    scale_fill_manual(values = make_style_values(levels(selected_df$map_value))$fill_values, drop = FALSE, name = "Average Intake")
+}
+
+print(add_uk_emphasis(
+  p_intake +
+    labs(title = "Average Daily Intake (grams, 15+, both sexes)") +
+    coord_sf(expand = FALSE) +
+    theme_void() +
+    theme(plot.title = element_text(size = 18, face = "bold", margin = margin(b = 6)), legend.position = "right"),
+  plot_df = plot_df,
+  selected_df = selected_df
+))
 ```
 
 ## Quick edit: add or edit variables
 
-You can add or edit extra variables simply by editing `map_data` in R and saving a copy if you want to persist changes. Example:
+You can edit variables directly in `data/legal_alcohol_policy.csv` and rerun the document. To add a new map, copy one of the chunks above and change the variable name/title. Example in-session edits:
 
 ```{r edit-example}
-# Example: update in-session metadata manually
-map_data$legal_system_family[map_data$name %in% c("singapore")] <- "common law"
-map_data$alcohol_policy_status[map_data$name %in% c("singapore")] <- "in place"
+# Example: temporary in-session updates before plotting
+map_data$legal_system[map_data$name %in% c("singapore")] <- "common law"
+map_data$specialist_substance_use_courts[map_data$name %in% c("singapore")] <- "No"
 ```

@@ -1,0 +1,18 @@
+Source_ID,Country_or_Section,Topic,Reference,URL,Hyperlink,URL_Status
+S001,International Data Source,World Health Organization,World Health Organization. Global Information System on Alcohol and Health (GISAH).,https://www.who.int/data/gho/data/themes/global-information-system-on-alcohol-and-health,Open source,Linked
+S002,International Data Source,Purchase age on-premise,WHO (last updated 2024),https://www.who.int/data/gho/data/indicators/indicator-details/GHO/age-limits-on-premise-service-,Open source,Linked
+S003,International Data Source,Purchase age off-premise,WHO (last updated 2024),https://www.who.int/data/gho/data/indicators/indicator-details/GHO/age-limits-off-premise-sales,Open source,Linked
+S004,International Data Source,BAC limits,WHO (last updated 2024),https://www.who.int/data/gho/data/indicators/indicator-details/GHO/legal-blood-alcohol-concentration-(bac)-limits,Open source,Linked
+S005,International Data Source,Random Breath Testing,WHO (last updated 2018),https://www.who.int/data/gho/data/indicators/indicator-details/GHO/random-breath-testing-(rbt)-use,Open source,Linked
+S006,International Data Source,National Written Policy,WHO (last updated 2024),https://www.who.int/data/gho/data/indicators/indicator-details/GHO/adopted-written-national-policy-on-alcohol,Open source,Linked
+S007,International Data Source,Legislation,WHO (last updated 2018),https://www.who.int/data/gho/data/indicators/indicator-details/GHO/national-legislation-to-prevent-illegal-alcohol,Open source,Linked
+S008,International Data Source,Average Intake,WHO (last updated 2025),https://www.who.int/data/gho/data/indicators/indicator-details/GHO/average-daily-intake-in-grams-of-alcohol--population-15,Open source,Linked
+S009,Northern Ireland,Specialist Use Court,Justice Innovation (n.d.),https://justiceinnovation.org/project/belfast-substance-misuse-court,Open source,Linked
+S010,Australia,Specialist Use Court,AIJA (2026),https://aija.org.au/atjc-problem-solving-courts-2/,Open source,Linked
+S011,England,Specialist Use Court,UK Parliament (2023),https://researchbriefings.files.parliament.uk/documents/POST-PN-0700/POST-PN-0700.pdf,Open source,Linked
+S012,Wales,Specialist Use Court,UK Parliament (2023),https://researchbriefings.files.parliament.uk/documents/POST-PN-0700/POST-PN-0700.pdf,Open source,Linked
+S013,United States,Specialist Use Court,AllRise (2026),https://allrise.org/about/treatment-courts/,Open source,Linked
+S014,Australia,Sobriety tagging,SCRAM Systems (2026),"https://www.scramsystems.com/media-room/alcohol-detection-anklets-showing-promise-in-nz/#:~:text=With%20COVID%2D19%2C%20Incidents%20of,the%20early%20days%20of%20abstinence.%E2%80%9D",Open source,Linked
+S015,United Kingdom,Sobriety tagging,GOV.UK (2022),https://insidehmcts.blog.gov.uk/2022/06/01/a-sobering-success-for-alcohol-monitoring-requirements/,Open source,Linked
+S016,Netherlands,Sobriety tagging,Reuters (2020),https://www.reuters.com/article/technology/dutch-drink-offenders-to-get-teetotal-tag-to-keep-them-dry-idUSKBN23M0W9/,Open source,Linked
+S017,Poland,Sobriety tagging,The Academy of Justice in Poland (2022),Perception of transdermal alcohol concentration - 4 Medicine,,Check URL
