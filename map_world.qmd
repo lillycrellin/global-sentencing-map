@@ -60,6 +60,14 @@ if (!file.exists(policy_path)) {
 policy_df <- read.csv(policy_path, stringsAsFactors = FALSE, check.names = FALSE)
 names(policy_df) <- tolower(names(policy_df))
 
+if ("row_type" %in% names(policy_df)) {
+  policy_df <- policy_df %>%
+    filter(tolower(trimws(as.character(row_type))) == "policy")
+}
+
+policy_df <- policy_df %>%
+  filter(!is.na(country), trimws(as.character(country)) != "")
+
 required_cols <- c("country")
 missing_cols <- setdiff(required_cols, names(policy_df))
 if (length(missing_cols) > 0) {
@@ -951,6 +959,105 @@ print(add_uk_emphasis(
   plot_df = plot_df,
   selected_df = selected_df
 ))
+```
+
+## Context bar charts (non yes/no variables)
+
+```{r context-bar-charts, fig.height=5, fig.width=10}
+context_vars <- c(
+  "legal_system",
+  "min_purchase_age_on_premise",
+  "min_purchase_age_off_premise",
+  "bac_limit_general_pop_per_l",
+  "bac_limit_young_drivers_per_l",
+  "bac_limit_prof_drivers_per_l",
+  "average_daily_intake_grams_pop_15+_bothsex",
+  "alcohol_tagging_requirements"
+)
+
+context_labels <- c(
+  legal_system = "Legal system",
+  min_purchase_age_on_premise = "Minimum purchase age (on-premise)",
+  min_purchase_age_off_premise = "Minimum purchase age (off-premise)",
+  bac_limit_general_pop_per_l = "BAC limit (general population)",
+  bac_limit_young_drivers_per_l = "BAC limit (young drivers)",
+  bac_limit_prof_drivers_per_l = "BAC limit (professional drivers)",
+  `average_daily_intake_grams_pop_15+_bothsex` = "Average daily intake (grams, 15+, both sexes)",
+  alcohol_tagging_requirements = "Alcohol tagging requirements"
+)
+
+yes_no_tokens <- c(
+  "yes", "no", "y", "n", "true", "false", "1", "0",
+  "yes (by state)", "yes by state",
+  "yes (for spirits only)", "yes for spirits only", "yes - spirits only", "spirits only"
+)
+
+context_df <- policy_df
+if ("covered_policy" %in% names(context_df)) {
+  covered_rows <- !is.na(context_df$covered_policy) & context_df$covered_policy
+  if (any(covered_rows)) context_df <- context_df[covered_rows, ]
+}
+
+for (var_name in context_vars) {
+  if (!(var_name %in% names(context_df))) next
+
+  values <- trimws(as.character(context_df[[var_name]]))
+  keep <- !is.na(values) & values != ""
+  if (!any(keep)) next
+
+  chart_df <- data.frame(
+    country = context_df$country[keep],
+    value_raw = values[keep],
+    stringsAsFactors = FALSE
+  )
+
+  value_lower <- tolower(chart_df$value_raw)
+  unique_lower <- unique(value_lower)
+  if (length(unique_lower) > 0 && all(unique_lower %in% yes_no_tokens)) next
+
+  numeric_values <- suppressWarnings(as.numeric(gsub("[^0-9.-]", "", chart_df$value_raw)))
+  numeric_share <- mean(!is.na(numeric_values))
+  plot_title <- context_labels[[var_name]]
+
+  if (!is.na(numeric_share) && numeric_share >= 0.7) {
+    num_df <- chart_df
+    num_df$num_value <- numeric_values
+    num_df <- num_df[!is.na(num_df$num_value), ]
+    if (nrow(num_df) == 0) next
+
+    num_df <- num_df[order(num_df$num_value, decreasing = TRUE), ]
+    num_df$country <- factor(num_df$country, levels = rev(num_df$country))
+
+    p_bar <- ggplot(num_df, aes(x = country, y = num_value)) +
+      geom_col(fill = "#4b4b4b") +
+      coord_flip() +
+      labs(title = plot_title, x = NULL, y = "Value") +
+      theme_minimal(base_size = 11) +
+      theme(
+        panel.grid.major.y = element_blank(),
+        axis.text.y = element_text(size = 9)
+      )
+  } else {
+    cat_df <- chart_df
+    cat_df <- cat_df[order(cat_df$value_raw, cat_df$country), ]
+    cat_df$country <- factor(cat_df$country, levels = rev(cat_df$country))
+
+    p_bar <- ggplot(cat_df, aes(x = country, y = 1, fill = value_raw)) +
+      geom_col() +
+      coord_flip(clip = "off") +
+      labs(title = plot_title, x = NULL, y = NULL, fill = "Category") +
+      scale_fill_grey(start = 0.85, end = 0.25) +
+      scale_y_continuous(breaks = NULL, expand = expansion(mult = c(0, 0.02))) +
+      theme_minimal(base_size = 11) +
+      theme(
+        panel.grid.major.y = element_blank(),
+        axis.text.y = element_text(size = 9),
+        legend.position = "right"
+      )
+  }
+
+  print(p_bar)
+}
 ```
 
 ## Quick edit: add or edit variables

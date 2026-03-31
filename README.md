@@ -9,7 +9,6 @@ This project is set up to build and plot country-speicifc alcohol consumption po
 - `data/legal_alcohol_policy.csv` — policy input used by `map_world.qmd`.
 - `World_Countries_(Generalized)_-573431906301700955/` — world shapefile assets.
 - `UK/` — UK shapefile assets (used to replace aggregate UK polygon).
-- `Sources_hyperlinked.csv` — References used 
 - `.gitignore`, `LICENSE`, `README.md` — project metadata.
 
 ## Quick start (maps)
